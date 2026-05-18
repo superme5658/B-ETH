@@ -1,50 +1,105 @@
+import asyncio
+import json
 import threading
 import time
-import json
-from priceflare import Sentinel, parsers
+from datetime import datetime
+import websockets
+import requests
 from strategy import BreakoutStrategy
 from feishu_bot import FeishuBot
 
+
 class SignalMonitor:
-    """使用PriceFlare实时监控价格并触发策略判断"""
+    """WebSocket实时监控价格并触发策略判断"""
     
     def __init__(self, symbol: str, feishu_bot: FeishuBot):
         self.symbol = symbol.lower()
         self.bot = feishu_bot
         self.strategy = BreakoutStrategy(symbol)
+        self.latest_price = None
+        self.check_interval = 60  # 每60秒检查一次策略
         
         # Binance WebSocket URL
         self.ws_url = f"wss://stream.binance.com:9443/ws/{self.symbol}usdt@trade"
         
-        # 价格缓存
-        self.latest_price = None
-        self.check_interval = 60  # 每60秒检查一次策略（30min/4H周期不需要高频）
+        # 价格跟踪（用于波动告警）
+        self.price_history = []
+        self.last_alert_time = 0
+        self.alert_cooldown = 600  # 10分钟冷却
         
-    def on_price_update(self, price: float):
-        """价格更新回调"""
-        self.latest_price = price
+    async def connect_websocket(self):
+        """连接币安WebSocket获取实时价格"""
+        try:
+            async with websockets.connect(self.ws_url) as websocket:
+                print(f"WebSocket已连接: {self.symbol.upper()}")
+                
+                while True:
+                    message = await websocket.recv()
+                    data = json.loads(message)
+                    
+                    # Binance trade 数据格式
+                    if 'p' in data:
+                        price = float(data['p'])
+                        self.latest_price = price
+                        self.check_price_volatility(price)
+                        
+        except Exception as e:
+            print(f"WebSocket连接错误: {e}")
+            await asyncio.sleep(5)
+            await self.connect_websocket()  # 重连
+    
+    def check_price_volatility(self, price: float):
+        """检查价格波动，超过阈值发送告警"""
+        now = time.time()
         
-    def on_alert(self, alert: dict):
-        """PriceFlare告警回调（快速波动通知）"""
-        alert_type = alert['type']
-        change_pct = alert['change_pct']
+        # 记录价格
+        self.price_history.append({
+            'price': price,
+            'time': now
+        })
         
-        # 快速波动时发送通知（可选，不是策略信号）
-        message = f"⚡ **波动告警**\n\n类型: {alert_type}\n幅度: {change_pct:+.2f}%\n价格: ${alert['cur_price']:,.2f}"
-        self.bot.send_card("行情波动", message, "yellow")
+        # 清理5分钟前的记录
+        self.price_history = [p for p in self.price_history if now - p['time'] <= 300]
         
-    def strategy_loop(self):
-        """定时执行策略检查"""
+        # 如果冷却期内，不发送告警
+        if now - self.last_alert_time < self.alert_cooldown:
+            return
+        
+        # 计算5分钟涨跌幅
+        if len(self.price_history) >= 2:
+            oldest_price = self.price_history[0]['price']
+            change_pct = (price - oldest_price) / oldest_price * 100
+            
+            if change_pct >= 2.0:  # 2%上涨
+                self.last_alert_time = now
+                asyncio.create_task(self.send_volatility_alert("pump", change_pct, price))
+            elif change_pct <= -2.0:  # 2%下跌
+                self.last_alert_time = now
+                asyncio.create_task(self.send_volatility_alert("crash", change_pct, price))
+    
+    async def send_volatility_alert(self, alert_type: str, change_pct: float, price: float):
+        """发送波动告警"""
+        if alert_type == "pump":
+            title = "⚡ 急速拉升"
+            color = "red"
+        else:
+            title = "⚡ 急速下跌"
+            color = "red"
+        
+        message = f"**{title}**\n\n幅度: {change_pct:+.2f}%\n价格: ${price:,.2f}"
+        await asyncio.to_thread(self.bot.send_card, "行情波动", message, color)
+    
+    def strategy_check_loop(self):
+        """定时执行策略检查（在独立线程中运行）"""
         while True:
             try:
                 if self.latest_price:
-                    signal = self.strategy.check_signal()
+                    signal = self.strategy.check_signal(self.latest_price)
                     if signal:
                         # 发送策略信号到飞书
-                        self.bot.send_card(
-                            f"📊 {self.symbol.upper()} 交易信号",
-                            signal['message'],
-                            "green" if signal['type'] == "LONG" else "red"
+                        asyncio.run_coroutine_threadsafe(
+                            self.send_signal_async(signal),
+                            asyncio.get_event_loop()
                         )
                         print(f"信号已推送: {signal['type']} at ${signal['price']}")
             except Exception as e:
@@ -52,32 +107,23 @@ class SignalMonitor:
             
             time.sleep(self.check_interval)
     
+    async def send_signal_async(self, signal: dict):
+        """异步发送信号"""
+        await asyncio.to_thread(
+            self.bot.send_card,
+            f"📊 {self.symbol.upper()} 交易信号",
+            signal['message'],
+            "green" if signal['type'] == "LONG" else "red"
+        )
+    
     def start(self):
         """启动监控"""
         # 启动策略检查线程
-        strategy_thread = threading.Thread(target=self.strategy_loop, daemon=True)
+        strategy_thread = threading.Thread(target=self.strategy_check_loop, daemon=True)
         strategy_thread.start()
         
-        # 启动PriceFlare实时监控
-        sentinel = Sentinel(
-            ws_url=self.ws_url,
-            price_parser=parsers.binance,
-            crash_threshold=2.0,   # 2%下跌触发告警
-            pump_threshold=2.0,    # 2%上涨触发告警
-            window_seconds=300,    # 5分钟窗口
-            cooldown_seconds=600,  # 10分钟冷却
-            on_pump=self.on_price_update,
-            on_crash=self.on_price_update,
-            on_alert=self.on_alert
-        )
-        
-        print(f"开始监控 {self.symbol.upper()}...")
-        sentinel.start()
-        
-        # 保持运行
+        # 启动WebSocket事件循环
         try:
-            while True:
-                time.sleep(1)
+            asyncio.run(self.connect_websocket())
         except KeyboardInterrupt:
-            sentinel.stop()
             print("监控已停止")
