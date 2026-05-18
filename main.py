@@ -29,35 +29,55 @@ async def lifespan(app: FastAPI):
     # 发送启动通知
     await asyncio.to_thread(
         bot.send_text,
-        f"🤖 信号监控机器人已启动\n\n"
-        f"正在监控: {SYMBOL}/USDT\n"
-        f"策略: 4H/30min突破策略\n"
-        f"检查频率: 每60秒"
+        f"🤖 **信号监控机器人已启动**\n\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 **监控配置**\n"
+        f"  • 交易对: {SYMBOL}/USDT\n"
+        f"  • 数据源: OKX\n"
+        f"  • 策略: 4H + 30min 突破策略\n"
+        f"  • 检查频率: 每60秒\n"
+        f"━━━━━━━━━━━━━━━━━━━\n\n"
+        f"✅ 系统运行正常，等待信号触发..."
     )
     print("机器人已启动")
     
     yield
     
-    # 关闭时的清理（如果需要）
+    # 关闭时的清理
     print("正在关闭...")
 
 
 # 创建FastAPI应用
-app = FastAPI(title="Crypto Signal Bot", lifespan=lifespan)
+app = FastAPI(title="Crypto Signal Bot - OKX", lifespan=lifespan)
 
 
 @app.get("/")
 def root():
-    return {"status": "running", "symbol": SYMBOL, "message": "信号监控中"}
+    return {
+        "status": "running",
+        "symbol": SYMBOL,
+        "exchange": "OKX",
+        "strategy": "4H + 30min Breakout",
+        "message": "信号监控中"
+    }
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "symbol": SYMBOL}
+    return {
+        "status": "healthy",
+        "symbol": SYMBOL,
+        "exchange": "OKX",
+        "latest_price": monitor.latest_price
+    }
 
 
 @app.post("/test")
 def test_push():
     """测试飞书推送"""
-    result = bot.send_card("测试消息", "机器人运行正常 ✅\n\n策略已就绪，等待信号", "green")
+    result = bot.send_card(
+        "✅ 测试消息", 
+        f"机器人运行正常\n\n交易对: {SYMBOL}/USDT\n数据源: OKX\n策略已就绪，等待信号", 
+        "green"
+    )
     return result
