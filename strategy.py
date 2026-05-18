@@ -5,10 +5,11 @@ from typing import Dict, Optional
 
 
 class BreakoutStrategy:
-    """4H/30min 突破策略 - 使用 OKX 数据"""
+    """4H/30min 突破策略 - 支持多币种"""
     
-    def __init__(self, symbol: str = "BTC"):
+    def __init__(self, symbol: str):
         self.symbol = f"{symbol}/USDT"
+        self.symbol_name = symbol
         # 使用 OKX 交易所
         self.exchange = ccxt.okx({
             'enableRateLimit': True,
@@ -36,7 +37,7 @@ class BreakoutStrategy:
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             return df
         except Exception as e:
-            print(f"获取{timeframe}K线数据失败: {e}")
+            print(f"[{self.symbol_name}] 获取{timeframe}K线数据失败: {e}")
             return pd.DataFrame()
     
     def get_prev_period_high_low(self, timeframe: str) -> tuple:
@@ -63,23 +64,24 @@ class BreakoutStrategy:
         signal = None
         
         # 做多信号：4H突破前高 + 30min突破前高
-        # 使用0.2%的过滤阈值避免假突破
         h4_broken = current_price > h4_high * 1.002
         m30_broken = current_price > m30_high * 1.002
         
         if h4_broken and m30_broken:
-            # 检查是否重复推送（每小时最多一次）
             current_hour = datetime.now().strftime('%Y%m%d%H')
-            signal_key = f"LONG_{current_hour}"
+            signal_key = f"{self.symbol_name}_LONG_{current_hour}"
             
             if self.last_signal_time != signal_key:
                 self.last_signal_time = signal_key
                 signal = {
                     "type": "LONG",
+                    "symbol": self.symbol_name,
                     "price": current_price,
                     "h4_high": h4_high,
                     "m30_high": m30_high,
-                    "message": f"🟢 **做多信号 (LONG)**\n\n"
+                    "h4_low": h4_low,
+                    "m30_low": m30_low,
+                    "message": f"🟢 **做多信号 (LONG)** - {self.symbol_name}/USDT\n\n"
                                f"━━━━━━━━━━━━━━━━━━━\n"
                                f"📈 **4H 周期**\n"
                                f"  • 前高: ${h4_high:,.2f}\n"
@@ -101,14 +103,15 @@ class BreakoutStrategy:
         
         if h4_broken_down and m30_broken_down:
             current_hour = datetime.now().strftime('%Y%m%d%H')
-            signal_key = f"SHORT_{current_hour}"
+            signal_key = f"{self.symbol_name}_SHORT_{current_hour}"
             
             if self.last_signal_time != signal_key:
                 self.last_signal_time = signal_key
                 signal = {
                     "type": "SHORT",
+                    "symbol": self.symbol_name,
                     "price": current_price,
-                    "message": f"🔴 **做空信号 (SHORT)**\n\n"
+                    "message": f"🔴 **做空信号 (SHORT)** - {self.symbol_name}/USDT\n\n"
                                f"━━━━━━━━━━━━━━━━━━━\n"
                                f"📉 **4H 周期**\n"
                                f"  • 前低: ${h4_low:,.2f}\n"
