@@ -13,12 +13,12 @@ class BreakoutStrategy:
         self.exchange = ccxt.okx({
             'enableRateLimit': True,
             'options': {
-                'defaultType': 'spot',  # 现货交易
+                'defaultType': 'spot',
             }
         })
         
-        # 存储前高前低数据
-        self.last_signal_time = None  # 避免重复推送
+        # 存储信号时间，避免重复推送
+        self.last_signal_time = None
         
     def fetch_ohlcv_data(self, timeframe: str, limit: int = 100) -> pd.DataFrame:
         """获取K线数据"""
@@ -43,22 +43,21 @@ class BreakoutStrategy:
         """获取前一个完整周期的最高点和最低点"""
         df = self.fetch_ohlcv_data(timeframe)
         if df.empty or len(df) < 2:
-            return None, None, None, None
+            return None, None
         
         # 使用前一根完整K线（排除当前未完成的）
         prev_candle = df.iloc[-2]
-        return prev_candle['high'], prev_candle['low'], prev_candle['open'], prev_candle['close']
+        return prev_candle['high'], prev_candle['low']
     
     def check_signal(self, current_price: float) -> Optional[Dict]:
         """检查是否有交易信号"""
         # 获取4H周期数据
-        h4_high, h4_low, h4_open, h4_close = self.get_prev_period_high_low('4h')
+        h4_high, h4_low = self.get_prev_period_high_low('4h')
         
-        # 获取30分钟周期数据（OKX支持30m周期）
-        m30_high, m30_low, m30_open, m30_close = self.get_prev_period_high_low('30m')
+        # 获取30分钟周期数据
+        m30_high, m30_low = self.get_prev_period_high_low('30m')
         
         if not h4_high or not m30_high or not h4_low or not m30_low:
-            print("无法获取K线数据，稍后重试...")
             return None
         
         signal = None
