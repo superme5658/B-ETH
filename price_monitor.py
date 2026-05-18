@@ -4,11 +4,6 @@ import threading
 import time
 from datetime import datetime
 import websockets
-import requests
-import os
-import hmac
-import base64
-import hashlib
 from strategy import BreakoutStrategy
 from feishu_bot import FeishuBot
 
@@ -24,7 +19,7 @@ class SignalMonitor:
         
         # OKX 配置 - 交易对格式: BTC-USDT
         self.okx_symbol = f"{self.symbol}-USDT"
-        self.check_interval = 300
+        self.check_interval = 300  # 每5分钟检查一次（30min/4H策略足够）
         
         # OKX WebSocket URL
         self.ws_url = "wss://ws.okx.com:8443/ws/v5/public"
@@ -32,7 +27,7 @@ class SignalMonitor:
         # 价格跟踪（用于波动告警）
         self.price_history = []
         self.last_alert_time = 0
-        self.alert_cooldown = 600
+        self.alert_cooldown = 600  # 10分钟冷却
         
     async def connect_websocket(self):
         """连接OKX WebSocket获取实时价格"""
@@ -58,16 +53,19 @@ class SignalMonitor:
                     
                     # 处理消息
                     async for message in websocket:
-                        data = json.loads(message)
-                        
-                        # 检查是否是交易数据
-                        if 'data' in data and isinstance(data['data'], list):
-                            for trade in data['data']:
-                                if 'px' in trade:
-                                    price = float(trade['px'])
-                                    self.latest_price = price
-                                    self.check_price_volatility(price)
-                                    
+                        try:
+                            data = json.loads(message)
+                            
+                            # 检查是否是交易数据
+                            if 'data' in data and isinstance(data['data'], list):
+                                for trade in data['data']:
+                                    if 'px' in trade:
+                                        price = float(trade['px'])
+                                        self.latest_price = price
+                                        self.check_price_volatility(price)
+                        except json.JSONDecodeError:
+                            pass
+                                            
             except Exception as e:
                 print(f"OKX WebSocket连接错误: {e}")
                 await asyncio.sleep(5)  # 等待5秒后重连
@@ -90,7 +88,7 @@ class SignalMonitor:
             return
         
         # 计算5分钟涨跌幅
-        if len(self.price_history) >= 10:  # 至少10个数据点
+        if len(self.price_history) >= 10:
             oldest_price = self.price_history[0]['price']
             change_pct = (price - oldest_price) / oldest_price * 100
             
@@ -126,6 +124,8 @@ class SignalMonitor:
                             asyncio.get_event_loop()
                         )
                         print(f"信号已推送: {signal['type']} at ${signal['price']}")
+                    else:
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] 无信号，当前价: ${self.latest_price:,.2f}")
                 else:
                     print("等待价格数据...")
             except Exception as e:
