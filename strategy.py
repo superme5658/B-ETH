@@ -1,114 +1,107 @@
 import ccxt
 import pandas as pd
-from crypto_pandas import CCXTPandasExchange
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, Optional
+
 
 class BreakoutStrategy:
     """4H/30min 突破策略"""
     
     def __init__(self, symbol: str = "BTC/USDT"):
-        self.symbol = symbol
-        self.exchange = CCXTPandasExchange(exchange=ccxt.binance())
+        self.symbol = f"{symbol}/USDT"
+        self.exchange = ccxt.binance()
         
-        # 存储前高数据
+        # 存储前高前低数据
         self.h4_high = None
+        self.h4_low = None
         self.m30_high = None
-        self.last_signal = None  # 避免重复推送
+        self.m30_low = None
+        self.last_signal_time = None  # 避免重复推送
         
-    def fetch_highs(self) -> Dict:
-        """获取4H和30分钟周期的前高"""
+    def fetch_ohlcv_data(self, timeframe: str, limit: int = 100) -> pd.DataFrame:
+        """获取K线数据"""
         try:
-            # 获取4小时K线（取最近100根找高点）
-            ohlcv_h4 = self.exchange.fetch_ohlcv(
-                self.symbol, 
-                timeframe="4h", 
-                limit=100
-            )
-            # 排除当前未完成的K线，用前一个完整K线的最高点
-            prev_h4_high = ohlcv_h4.iloc[-2]['high'] if len(ohlcv_h4) >= 2 else None
-            
-            # 获取30分钟K线
-            ohlcv_m30 = self.exchange.fetch_ohlcv(
+            ohlcv = self.exchange.fetch_ohlcv(
                 self.symbol,
-                timeframe="30m",
-                limit=100
+                timeframe=timeframe,
+                limit=limit
             )
-            prev_m30_high = ohlcv_m30.iloc[-2]['high'] if len(ohlcv_m30) >= 2 else None
             
-            # 当前实时价格
-            ticker = self.exchange.fetch_ticker(self.symbol)
-            current_price = ticker['last']
-            
-            return {
-                'current_price': current_price,
-                'h4_prev_high': prev_h4_high,
-                'm30_prev_high': prev_m30_high,
-                'timestamp': datetime.now()
-            }
+            df = pd.DataFrame(
+                ohlcv,
+                columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+            )
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            return df
         except Exception as e:
-            print(f"获取K线数据失败: {e}")
-            return None
+            print(f"获取{timeframe}K线数据失败: {e}")
+            return pd.DataFrame()
     
-    def check_signal(self) -> Optional[Dict]:
-        """检查是否有交易信号"""
-        data = self.fetch_highs()
-        if not data:
-            return None
+    def get_prev_period_high_low(self, timeframe: str) -> tuple:
+        """获取前一个完整周期的最高点和最低点"""
+        df = self.fetch_ohlcv_data(timeframe)
+        if df.empty or len(df) < 2:
+            return None, None
         
-        current = data['current_price']
-        h4_high = data['h4_prev_high']
-        m30_high = data['m30_prev_high']
+        # 使用前一根完整K线（排除当前未完成的）
+        prev_candle = df.iloc[-2]
+        return prev_candle['high'], prev_candle['low']
+    
+    def check_signal(self, current_price: float) -> Optional[Dict]:
+        """检查是否有交易信号"""
+        # 获取4H周期数据
+        h4_high, h4_low = self.get_prev_period_high_low('4h')
+        # 获取30分钟周期数据
+        m30_high, m30_low = self.get_prev_period_high_low('30m')
+        
+        if not h4_high or not m30_high:
+            return None
         
         signal = None
         
-        # 做多信号：4H突破 + 30min突破
-        if h4_high and m30_high:
-            # 4H级别突破（收盘价逻辑，这里用当前价模拟）
-            h4_broken = current > h4_high * 1.001  # 0.1%过滤假突破
-            # 30min级别突破
-            m30_broken = current > m30_high * 1.001
+        # 做多信号：4H突破前高 + 30min突破前高
+        # 使用0.1%的过滤阈值避免假突破
+        h4_broken = current_price > h4_high * 1.001
+        m30_broken = current_price > m30_high * 1.001
+        
+        if h4_broken and m30_broken:
+            # 检查是否重复推送（同一小时周期内不重复）
+            current_hour = datetime.now().strftime('%Y%m%d%H')
+            signal_key = f"LONG_{current_hour}"
             
-            if h4_broken and m30_broken:
-                signal_type = "LONG"
+            if self.last_signal_time != signal_key:
+                self.last_signal_time = signal_key
                 signal = {
-                    "type": signal_type,
-                    "price": current,
+                    "type": "LONG",
+                    "price": current_price,
                     "h4_high": h4_high,
                     "m30_high": m30_high,
                     "message": f"🟢 **做多信号**\n\n"
                                f"• 4H前高: ${h4_high:,.2f} ✅已突破\n"
                                f"• 30min前高: ${m30_high:,.2f} ✅已突破\n"
-                               f"• 当前价格: ${current:,.2f}"
+                               f"• 当前价格: ${current_price:,.2f}\n\n"
+                               f"**建议**：回踩30min前高附近入场，止损设在前低下方"
                 }
+        
+        # 做空信号：4H跌破前低 + 30min跌破前低
+        if h4_low and m30_low:
+            h4_broken_down = current_price < h4_low * 0.999
+            m30_broken_down = current_price < m30_low * 0.999
             
-            # 做空信号：4H跌破前低 + 30min跌破前低
-            # 获取前低（简化：用最低点逻辑）
-            ohlcv_h4 = self.exchange.fetch_ohlcv(self.symbol, "4h", limit=100)
-            ohlcv_m30 = self.exchange.fetch_ohlcv(self.symbol, "30m", limit=100)
-            h4_low = ohlcv_h4.iloc[-2]['low'] if len(ohlcv_h4) >= 2 else None
-            m30_low = ohlcv_m30.iloc[-2]['low'] if len(ohlcv_m30) >= 2 else None
-            
-            if h4_low and m30_low:
-                h4_broken_down = current < h4_low * 0.999
-                m30_broken_down = current < m30_low * 0.999
+            if h4_broken_down and m30_broken_down:
+                current_hour = datetime.now().strftime('%Y%m%d%H')
+                signal_key = f"SHORT_{current_hour}"
                 
-                if h4_broken_down and m30_broken_down:
-                    signal_type = "SHORT"
+                if self.last_signal_time != signal_key:
+                    self.last_signal_time = signal_key
                     signal = {
-                        "type": signal_type,
-                        "price": current,
+                        "type": "SHORT",
+                        "price": current_price,
                         "message": f"🔴 **做空信号**\n\n"
                                    f"• 4H前低: ${h4_low:,.2f} ✅已跌破\n"
                                    f"• 30min前低: ${m30_low:,.2f} ✅已跌破\n"
-                                   f"• 当前价格: ${current:,.2f}"
+                                   f"• 当前价格: ${current_price:,.2f}\n\n"
+                                   f"**建议**：反弹30min前低附近入场，止损设在前高上方"
                     }
         
-        # 防重复推送：同一信号5分钟内不重复
-        if signal:
-            signal_key = f"{signal['type']}_{data['timestamp'].strftime('%Y%m%d%H')}"
-            if self.last_signal != signal_key:
-                self.last_signal = signal_key
-                return signal
-        
-        return None
+        return signal
