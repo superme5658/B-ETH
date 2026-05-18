@@ -5,48 +5,72 @@ import time
 from datetime import datetime
 import websockets
 import requests
+import os
+import hmac
+import base64
+import hashlib
 from strategy import BreakoutStrategy
 from feishu_bot import FeishuBot
 
 
 class SignalMonitor:
-    """WebSocket实时监控价格并触发策略判断"""
+    """OKX WebSocket实时监控价格并触发策略判断"""
     
     def __init__(self, symbol: str, feishu_bot: FeishuBot):
-        self.symbol = symbol.lower()
+        self.symbol = symbol.upper()
         self.bot = feishu_bot
         self.strategy = BreakoutStrategy(symbol)
         self.latest_price = None
-        self.check_interval = 60  # 每60秒检查一次策略
         
-        # Binance WebSocket URL
-        self.ws_url = f"wss://stream.binance.com:9443/ws/{self.symbol}usdt@trade"
+        # OKX 配置 - 交易对格式: BTC-USDT
+        self.okx_symbol = f"{self.symbol}-USDT"
+        self.check_interval = 60
+        
+        # OKX WebSocket URL
+        self.ws_url = "wss://ws.okx.com:8443/ws/v5/public"
         
         # 价格跟踪（用于波动告警）
         self.price_history = []
         self.last_alert_time = 0
-        self.alert_cooldown = 600  # 10分钟冷却
+        self.alert_cooldown = 600
         
     async def connect_websocket(self):
-        """连接币安WebSocket获取实时价格"""
-        try:
-            async with websockets.connect(self.ws_url) as websocket:
-                print(f"WebSocket已连接: {self.symbol.upper()}")
-                
-                while True:
-                    message = await websocket.recv()
-                    data = json.loads(message)
+        """连接OKX WebSocket获取实时价格"""
+        while True:
+            try:
+                async with websockets.connect(
+                    self.ws_url,
+                    ping_interval=20,
+                    ping_timeout=30
+                ) as websocket:
+                    print(f"OKX WebSocket已连接，订阅 {self.okx_symbol} 交易数据")
                     
-                    # Binance trade 数据格式
-                    if 'p' in data:
-                        price = float(data['p'])
-                        self.latest_price = price
-                        self.check_price_volatility(price)
+                    # 订阅实时交易数据
+                    subscribe_msg = {
+                        "op": "subscribe",
+                        "args": [{
+                            "channel": "trades",
+                            "instId": self.okx_symbol
+                        }]
+                    }
+                    await websocket.send(json.dumps(subscribe_msg))
+                    print(f"已订阅 {self.okx_symbol} 实时交易")
+                    
+                    # 处理消息
+                    async for message in websocket:
+                        data = json.loads(message)
                         
-        except Exception as e:
-            print(f"WebSocket连接错误: {e}")
-            await asyncio.sleep(5)
-            await self.connect_websocket()  # 重连
+                        # 检查是否是交易数据
+                        if 'data' in data and isinstance(data['data'], list):
+                            for trade in data['data']:
+                                if 'px' in trade:
+                                    price = float(trade['px'])
+                                    self.latest_price = price
+                                    self.check_price_volatility(price)
+                                    
+            except Exception as e:
+                print(f"OKX WebSocket连接错误: {e}")
+                await asyncio.sleep(5)  # 等待5秒后重连
     
     def check_price_volatility(self, price: float):
         """检查价格波动，超过阈值发送告警"""
@@ -66,7 +90,7 @@ class SignalMonitor:
             return
         
         # 计算5分钟涨跌幅
-        if len(self.price_history) >= 2:
+        if len(self.price_history) >= 10:  # 至少10个数据点
             oldest_price = self.price_history[0]['price']
             change_pct = (price - oldest_price) / oldest_price * 100
             
@@ -102,6 +126,8 @@ class SignalMonitor:
                             asyncio.get_event_loop()
                         )
                         print(f"信号已推送: {signal['type']} at ${signal['price']}")
+                else:
+                    print("等待价格数据...")
             except Exception as e:
                 print(f"策略检查失败: {e}")
             
@@ -111,7 +137,7 @@ class SignalMonitor:
         """异步发送信号"""
         await asyncio.to_thread(
             self.bot.send_card,
-            f"📊 {self.symbol.upper()} 交易信号",
+            f"📊 {self.symbol} 交易信号",
             signal['message'],
             "green" if signal['type'] == "LONG" else "red"
         )
