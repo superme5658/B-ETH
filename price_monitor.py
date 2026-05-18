@@ -24,7 +24,7 @@ class SignalMonitor:
         
         # OKX 配置 - 交易对格式: BTC-USDT
         self.okx_symbol = f"{self.symbol}-USDT"
-        self.check_interval = 60
+        self.check_interval = 300
         
         # OKX WebSocket URL
         self.ws_url = "wss://ws.okx.com:8443/ws/v5/public"
